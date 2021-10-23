@@ -1012,7 +1012,7 @@ struct rdp_to_xkb_keyboard_layout rdp_keyboards[] = {
 	{KBD_DANISH, "dk", 0},
 	{KBD_GERMAN, "de", 0},
 	{KBD_GERMAN_NEO, "de", "neo"},
-	{KBD_GERMAN_IBM, "de", "qwerty"},
+	{KBD_GERMAN_IBM, "de", 0},
 	{KBD_GREEK, "gr", 0},
 	{KBD_GREEK_220, "gr", "simple"},
 	{KBD_GREEK_319, "gr", "extended"},
@@ -1539,8 +1539,8 @@ rdp_notify_wheel_scroll(RdpPeerContext *peerContext, UINT16 flags, uint32_t axis
 		ivalue = (0xff - ivalue) * -1;
 
 	/*
-	* Flip the scroll direction as the RDP direction is inverse of X/Wayland 
-	* for vertical scroll 
+	* Flip the scroll direction as the RDP direction is inverse of X/Wayland
+	* for vertical scroll
 	*/
 	if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
 		ivalue *= -1;
@@ -1573,7 +1573,7 @@ rdp_notify_wheel_scroll(RdpPeerContext *peerContext, UINT16 flags, uint32_t axis
 		weston_event.discrete = *accumWheelRotationDiscrete / 120;
 		weston_event.has_discrete = true;
 
-		rdp_debug_verbose(b, "wheel: value:%f discrete:%d\n", 
+		rdp_debug_verbose(b, "wheel: value:%f discrete:%d\n",
 			weston_event.value, weston_event.discrete);
 
 		weston_compositor_get_time(&time);
@@ -1582,7 +1582,7 @@ rdp_notify_wheel_scroll(RdpPeerContext *peerContext, UINT16 flags, uint32_t axis
 
 		*accumWheelRotationPrecise %= 12;
 		*accumWheelRotationDiscrete %= 120;
-		
+
 		return true;
 	}
 
@@ -1832,7 +1832,7 @@ send_release_key:
 
 			if (send_release_key) {
 				send_release_key = false;
-				assert(keyState == WL_KEYBOARD_KEY_STATE_PRESSED); 
+				assert(keyState == WL_KEYBOARD_KEY_STATE_PRESSED);
 				keyState = WL_KEYBOARD_KEY_STATE_RELEASED;
 				goto send_release_key;
 			}
