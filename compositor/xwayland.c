@@ -94,7 +94,7 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		snprintf(s, sizeof s, "%d", fd);
 		setenv("WAYLAND_SOCKET", s, 1);
 
-		if (abstract_fd) {
+		if (abstract_fd >= 0) {
 			fd = dup(abstract_fd);
 			if (fd < 0)
 				goto fail;
@@ -145,7 +145,7 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		};
 
 		int argc = 9;
-		if (abstract_fd) {
+		if (abstract_fd >= 0) {
 #ifdef HAVE_XWAYLAND_LISTENFD
 			argv[argc++] = "-listenfd";
 #else
