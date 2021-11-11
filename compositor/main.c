@@ -719,6 +719,7 @@ usage(int error_code)
 		"Options for rdp-backend.so:\n\n"
 		"  --width=WIDTH\t\tWidth of desktop\n"
 		"  --height=HEIGHT\tHeight of desktop\n"
+		"  --scale=SCALE\t\tScale factor of desktop\n"
 		"  --env-socket\t\tUse socket defined in RDP_FD env variable as peer connection\n"
 		"  --address=ADDR\tThe address to bind\n"
 		"  --port=PORT\t\tThe port to listen on\n"
@@ -2707,13 +2708,22 @@ rdp_backend_output_configure(struct weston_output *output)
 	struct wet_compositor *compositor = to_wet_compositor(output->compositor);
 	struct wet_output_config *parsed_options = compositor->parsed_options;
 	const struct weston_rdp_output_api *api = weston_rdp_output_get_api(output->compositor);
+	struct weston_config_section *section = NULL;
 	int width = 640;
 	int height = 480;
+	int scale = 1;
 
 	assert(parsed_options);
 
 	if (!api) {
 		weston_log("Cannot use weston_rdp_output_api.\n");
+		return -1;
+	}
+
+	/* obtain default output configuration from backend, this can be override by below. */
+	if (api->output_get_config(output, &width, &height, &scale) < 0) {
+		weston_log("Cannot get output configuration from backend \"%s\" using weston_rdp_output_api.\n",
+			   output->name);
 		return -1;
 	}
 
@@ -2723,8 +2733,12 @@ rdp_backend_output_configure(struct weston_output *output)
 	if (parsed_options->height)
 		height = parsed_options->height;
 
-	weston_output_set_scale(output, 1);
-	weston_output_set_transform(output, WL_OUTPUT_TRANSFORM_NORMAL);
+	wet_output_set_scale(output, section, scale, parsed_options->scale);
+	if (wet_output_set_transform(output, section,
+				     WL_OUTPUT_TRANSFORM_NORMAL,
+				     UINT32_MAX) < 0) {
+		return -1;
+	}
 
 	if (api->output_set_size(output, width, height) < 0) {
 		weston_log("Cannot configure output \"%s\" using weston_rdp_output_api.\n",
@@ -2768,6 +2782,7 @@ load_rdp_backend(struct weston_compositor *c,
 		{ WESTON_OPTION_BOOLEAN, "env-socket", 0, &config.env_socket },
 		{ WESTON_OPTION_INTEGER, "width", 0, &parsed_options->width },
 		{ WESTON_OPTION_INTEGER, "height", 0, &parsed_options->height },
+		{ WESTON_OPTION_INTEGER, "scale", 0, &parsed_options->scale },
 		{ WESTON_OPTION_STRING,  "address", 0, &config.bind_address },
 		{ WESTON_OPTION_INTEGER, "port", 0, &config.port },
 		{ WESTON_OPTION_BOOLEAN, "no-clients-resize", 0, &config.no_clients_resize },
@@ -3223,13 +3238,16 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	char *option_modules = NULL;
 	char *log = NULL;
 	char *log_scopes = NULL;
+	char *log_scopes_env = NULL;
 	char *flight_rec_scopes = NULL;
 	char *server_socket = NULL;
+	char *idle_time_env = NULL;
 	int32_t idle_time = -1;
 	int32_t help = 0;
 	char *socket_name = NULL;
 	int32_t version = 0;
 	int32_t noconfig = 0;
+	char *debug_protocol_env = NULL;
 	int32_t debug_protocol = 0;
 	bool numlock_on;
 	char *config_file = NULL;
@@ -3245,6 +3263,7 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	sigset_t mask;
 
 	bool wait_for_debugger = false;
+	bool disable_terminate_on_sigint = false;
 	struct wl_protocol_logger *protologger = NULL;
 
 	const struct weston_option core_options[] = {
@@ -3262,6 +3281,7 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 		{ WESTON_OPTION_BOOLEAN, "no-config", 0, &noconfig },
 		{ WESTON_OPTION_STRING, "config", 'c', &config_file },
 		{ WESTON_OPTION_BOOLEAN, "wait-for-debugger", 0, &wait_for_debugger },
+		{ WESTON_OPTION_BOOLEAN, "disable-terminate-on-sigint", 0, &disable_terminate_on_sigint },
 		{ WESTON_OPTION_BOOLEAN, "debug", 0, &debug_protocol },
 		{ WESTON_OPTION_STRING, "logger-scopes", 'l', &log_scopes },
 		{ WESTON_OPTION_STRING, "flight-rec-scopes", 'f', &flight_rec_scopes },
@@ -3311,6 +3331,10 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	weston_log_subscribe_to_scopes(log_ctx, logger, flight_rec,
 				       log_scopes, flight_rec_scopes);
 
+	log_scopes_env = getenv("WESTON_LOG_SCOPES");
+	if (log_scopes_env)
+		weston_log_setup_scopes(log_ctx, logger, log_scopes_env);
+
 	weston_log("%s\n"
 		   STAMP_SPACE "%s\n"
 		   STAMP_SPACE "Bug reports to: %s\n"
@@ -3330,11 +3354,27 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 		goto out_display;
 	}
 
+	if (load_configuration(&config, noconfig, config_file) < 0)
+		goto out_config;
+	wet.config = config;
+	wet.parsed_options = NULL;
+
+	section = weston_config_get_section(config, "core", NULL, NULL);
+
 	loop = wl_display_get_event_loop(display);
 	signals[0] = wl_event_loop_add_signal(loop, SIGTERM, on_term_signal,
 					      display);
-	signals[1] = wl_event_loop_add_signal(loop, SIGINT, on_term_signal,
+
+	/* vs-code 'pause' button raise SIGINT, disable to terminate if requested */
+	if (!disable_terminate_on_sigint)
+		weston_config_section_get_bool(section, "disable-terminate-on-sigint",
+					       &disable_terminate_on_sigint, false);
+	if (!disable_terminate_on_sigint)
+		signals[1] = wl_event_loop_add_signal(loop, SIGINT, on_term_signal,
 					      display);
+	else
+		signals[1] = NULL;
+
 	signals[2] = wl_event_loop_add_signal(loop, SIGQUIT, on_term_signal,
 					      display);
 
@@ -3342,7 +3382,7 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	signals[3] = wl_event_loop_add_signal(loop, SIGCHLD, sigchld_handler,
 					      &wet);
 
-	if (!signals[0] || !signals[1] || !signals[2] || !signals[3])
+	if (!signals[0] || (!signals[1] && !disable_terminate_on_sigint) || !signals[2] || !signals[3])
 		goto out_signals;
 
 	/* Xwayland uses SIGUSR1 for communicating with weston. Since some
@@ -3352,13 +3392,6 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGUSR1);
 	pthread_sigmask(SIG_BLOCK, &mask, NULL);
-
-	if (load_configuration(&config, noconfig, config_file) < 0)
-		goto out_signals;
-	wet.config = config;
-	wet.parsed_options = NULL;
-
-	section = weston_config_get_section(config, "core", NULL, NULL);
 
 	if (!wait_for_debugger) {
 		weston_config_section_get_bool(section, "wait-for-debugger",
@@ -3392,6 +3425,10 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	protologger = wl_display_add_protocol_logger(display,
 						     protocol_log_fn,
 						     NULL);
+
+	debug_protocol_env = getenv("WESTON_DEBUG_PROTOCOL");
+	if (debug_protocol_env && (strcmp(debug_protocol_env, "true") == 0))
+		debug_protocol = 1;
 	if (debug_protocol)
 		weston_compositor_enable_debug_protocol(wet.compositor);
 
@@ -3421,6 +3458,9 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	if (wet.init_failed)
 		goto out;
 
+	idle_time_env = getenv("WESTON_IDLE_TIME");
+	if (!idle_time_env || !safe_strtoint(idle_time_env, &idle_time))
+		idle_time = -1;
 	if (idle_time < 0)
 		weston_config_section_get_int(section, "idle-time", &idle_time, -1);
 	if (idle_time < 0)
@@ -3531,6 +3571,7 @@ out_signals:
 		if (signals[i])
 			wl_event_source_remove(signals[i]);
 
+out_config:
 	wl_display_destroy(display);
 
 out_display:

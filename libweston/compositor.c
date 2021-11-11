@@ -590,6 +590,7 @@ weston_surface_create(struct weston_compositor *compositor)
 
 	wl_signal_init(&surface->destroy_signal);
 	wl_signal_init(&surface->commit_signal);
+	wl_signal_init(&surface->repaint_signal);
 
 	surface->compositor = compositor;
 	surface->ref_count = 1;
@@ -1745,6 +1746,7 @@ weston_surface_schedule_repaint(struct weston_surface *surface)
 {
 	struct weston_output *output;
 
+	wl_signal_emit(&surface->repaint_signal, surface);
 	wl_list_for_each(output, &surface->compositor->output_list, link)
 		if (surface->output_mask & (1u << output->id))
 			weston_output_schedule_repaint(output);
@@ -1761,6 +1763,7 @@ weston_view_schedule_repaint(struct weston_view *view)
 {
 	struct weston_output *output;
 
+	wl_signal_emit(&view->surface->repaint_signal, view->surface);
 	wl_list_for_each(output, &view->surface->compositor->output_list, link)
 		if (view->output_mask & (1u << output->id))
 			weston_output_schedule_repaint(output);
@@ -3032,6 +3035,9 @@ output_repaint_timer_arm(struct weston_compositor *compositor)
 
 		msec_to_this = timespec_sub_to_msec(&output->next_repaint,
 						    &now);
+		TL_POINT(compositor, "core_repaint_timer_arm_output", TLP_OUTPUT(output),
+			 TLP_MSEC(&msec_to_this),
+			 TLP_END);
 		if (!any_should_repaint || msec_to_this < msec_to_next)
 			msec_to_next = msec_to_this;
 
@@ -3049,6 +3055,9 @@ output_repaint_timer_arm(struct weston_compositor *compositor)
 	 */
 	if (msec_to_next < 1)
 		msec_to_next = 1;
+
+	TL_POINT(compositor, "core_repaint_timer_arm",
+		TLP_MSEC(&msec_to_next), TLP_END);
 
 	wl_event_source_timer_update(compositor->repaint_timer, msec_to_next);
 }
@@ -3144,6 +3153,7 @@ weston_output_finish_frame(struct weston_output *output,
 	int32_t refresh_nsec;
 	struct timespec now;
 	struct timespec vblank_monotonic;
+	struct timespec next_present_monotonic;
 	int64_t msec_rel;
 
 	assert(output->repaint_status == REPAINT_AWAITING_COMPLETION);
@@ -3210,7 +3220,16 @@ weston_output_finish_frame(struct weston_output *output,
 		}
 	}
 
+	weston_compositor_read_presentation_clock(compositor, &now);
 out:
+	next_present_monotonic = convert_presentation_time_now(compositor,
+							 &output->next_repaint, &now,
+							 CLOCK_MONOTONIC);
+	TL_POINT(compositor, "core_repaint_finished_next_repaint", TLP_OUTPUT(output),
+		 TLP_MSEC(&msec_rel),
+		 TLP_NEXT_PRESENT(&next_present_monotonic),
+		 TLP_END);
+
 	output->repaint_status = REPAINT_SCHEDULED;
 	output_repaint_timer_arm(compositor);
 }
@@ -3233,6 +3252,7 @@ idle_repaint(void *data)
 	assert(output->repaint_status == REPAINT_BEGIN_FROM_IDLE);
 	output->repaint_status = REPAINT_AWAITING_COMPLETION;
 	output->idle_repaint_source = NULL;
+	TL_POINT(output->compositor, "core_repaint_start_loop", TLP_OUTPUT(output), TLP_END);
 	ret = output->start_repaint_loop(output);
 	if (ret != 0)
 		weston_output_schedule_repaint_reset(output);
@@ -4507,13 +4527,24 @@ weston_surface_get_bounding_box(struct weston_surface *surface)
  */
 WL_EXPORT int
 weston_surface_copy_content(struct weston_surface *surface,
-			    void *target, size_t size,
+			    void *target, size_t size, size_t target_stride,
+			    int target_width, int target_height,
 			    int src_x, int src_y,
-			    int width, int height)
+			    int src_width, int src_height,
+			    bool y_flip, bool is_argb)
 {
 	struct weston_renderer *rer = surface->compositor->renderer;
 	int cw, ch;
 	const size_t bytespp = 4; /* PIXMAN_a8b8g8r8 */
+
+	if (!target_width)
+		target_width = src_width;
+
+	if (!target_height)
+		target_height = src_height;
+
+	if (!target_stride)
+		target_stride = target_width * bytespp;
 
 	if (!rer->surface_copy_content)
 		return -1;
@@ -4523,17 +4554,17 @@ weston_surface_copy_content(struct weston_surface *surface,
 	if (src_x < 0 || src_y < 0)
 		return -1;
 
-	if (width <= 0 || height <= 0)
+	if (src_width <= 0 || src_height <= 0)
 		return -1;
 
-	if (src_x + width > cw || src_y + height > ch)
+	if (src_x + src_width > cw || src_y + src_height > ch)
 		return -1;
 
-	if (width * bytespp * height > size)
+	if (target_stride * target_height > size)
 		return -1;
 
-	return rer->surface_copy_content(surface, target, size,
-					 src_x, src_y, width, height);
+	return rer->surface_copy_content(surface, target, size, target_stride, target_width, target_height,
+					 src_x, src_y, src_width, src_height, y_flip, is_argb);
 }
 
 static void
@@ -7411,9 +7442,9 @@ debug_scene_view_print(FILE *fp, struct weston_view *view, int view_idx)
 	    view->surface->get_label(view->surface, desc, sizeof(desc)) < 0) {
 		strcpy(desc, "[no description available]");
 	}
-	fprintf(fp, "\tView %d (role %s, PID %d, surface ID %u, %s, %p):\n",
+	fprintf(fp, "\tView %d (role %s, PID %d, surface ID %u, %s, %p, %p):\n",
 		view_idx, view->surface->role_name, pid, surface_id,
-		desc, view);
+		desc, view, view->surface);
 
 	box = pixman_region32_extents(&view->transform.boundingbox);
 	fprintf(fp, "\t\tposition: (%d, %d) -> (%d, %d)\n",

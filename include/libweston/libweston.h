@@ -905,6 +905,9 @@ enum weston_layer_position {
 	/* For fullscreen applications that should cover UI. */
 	WESTON_LAYER_POSITION_FULLSCREEN = 0xb0000000,
 
+	/* For menu/popup window that should be above fullscreen applications */
+	WESTON_LAYER_POSITION_POPUP_UI   = 0xc0000000,
+
 	/* For special UI like on-screen keyboard that fullscreen applications
 	 * will need. */
 	WESTON_LAYER_POSITION_TOP_UI     = 0xe0000000,
@@ -956,9 +959,11 @@ struct weston_renderer {
 
 	/** See weston_surface_copy_content() */
 	int (*surface_copy_content)(struct weston_surface *surface,
-				    void *target, size_t size,
+				    void *target, size_t size, size_t stride,
+				    int target_width, int target_height,
 				    int src_x, int src_y,
-				    int width, int height);
+				    int src_width, int src_height,
+				    bool y_flip, bool is_argb);
 
 	/** See weston_compositor_import_dmabuf() */
 	bool (*import_dmabuf)(struct weston_compositor *ec,
@@ -1443,6 +1448,7 @@ struct weston_surface {
 	struct wl_signal destroy_signal; /* callback argument: this surface */
 	struct weston_compositor *compositor;
 	struct wl_signal commit_signal;
+	struct wl_signal repaint_signal;
 
 	/* struct weston_paint_node::surface_link */
 	struct wl_list paint_node_list;
@@ -1461,6 +1467,8 @@ struct weston_surface {
 	bool touched;
 
 	void *renderer_state;
+
+	void *backend_state;
 
 	struct wl_list views;
 
@@ -1819,9 +1827,11 @@ weston_surface_get_bounding_box(struct weston_surface *surface);
 
 int
 weston_surface_copy_content(struct weston_surface *surface,
-			    void *target, size_t size,
+			    void *target, size_t size, size_t stride,
+			    int target_width, int target_height,
 			    int src_x, int src_y,
-			    int width, int height);
+			    int src_width, int src_height,
+			    bool y_flip, bool is_argb);
 
 struct weston_buffer *
 weston_buffer_from_resource(struct wl_resource *resource);

@@ -248,6 +248,16 @@ weston_desktop_api_minimized_requested(struct weston_desktop *desktop,
 }
 
 void
+weston_desktop_api_set_window_icon(struct weston_desktop *desktop,
+				   struct weston_desktop_surface *surface,
+				   int32_t width, int32_t height, int32_t bpp, void *bits)
+{
+	if (desktop->api.set_window_icon != NULL)
+		desktop->api.set_window_icon(surface, width, height, bpp, bits,
+					     desktop->user_data);
+}
+
+void
 weston_desktop_api_set_xwayland_position(struct weston_desktop *desktop,
 					 struct weston_desktop_surface *surface,
 					 int32_t x, int32_t y)
@@ -255,4 +265,14 @@ weston_desktop_api_set_xwayland_position(struct weston_desktop *desktop,
 	if (desktop->api.set_xwayland_position != NULL)
 		desktop->api.set_xwayland_position(surface, x, y,
 						   desktop->user_data);
+}
+
+void
+weston_desktop_api_move_xwayland_position(struct weston_desktop *desktop,
+					  struct weston_desktop_surface *surface,
+					  int32_t x, int32_t y)
+{
+	if (desktop->api.move_xwayland_position != NULL)
+		desktop->api.move_xwayland_position(surface, x, y,
+						    desktop->user_data);
 }

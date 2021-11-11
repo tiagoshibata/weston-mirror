@@ -170,6 +170,8 @@ struct weston_wm_window {
 	int delete_window;
 	int maximized_vert;
 	int maximized_horz;
+	int take_focus;
+	int no_shadow;
 	struct wm_size_hints size_hints;
 	struct motif_wm_hints motif_hints;
 	struct wl_list link;
@@ -346,6 +348,7 @@ xcb_cursor_library_load_cursor(struct weston_wm *wm, const char *file)
 	xcb_cursor_t cursor;
 	XcursorImages *images;
 	char *v = NULL;
+	char *theme = NULL;
 	int size = 0;
 
 	if (!file)
@@ -358,7 +361,9 @@ xcb_cursor_library_load_cursor(struct weston_wm *wm, const char *file)
 	if (!size)
 		size = 32;
 
-	images = XcursorLibraryLoadImages (file, NULL, size);
+	theme = getenv("XCURSOR_THEME");
+
+	images = XcursorLibraryLoadImages (file, theme, size);
 	if (!images)
 		return -1;
 
@@ -491,6 +496,43 @@ read_and_dump_property(FILE *fp, struct weston_wm *wm,
 	free(reply);
 }
 
+static char *
+window_type_atom_to_string(struct weston_wm *wm, xcb_atom_t atom)
+{
+	if (atom == wm->atom.net_wm_window_type_normal)
+		return "_NET_WM_WINDOW_TYPE_NORMAL";
+	else if (atom == wm->atom.net_wm_window_type_desktop)
+		return "_NET_WM_WINDOW_TYPE_DESKTOP";
+	else if (atom == wm->atom.net_wm_window_type_dock)
+		return "_NET_WM_WINDOW_TYPE_DOCK";
+	else if (atom == wm->atom.net_wm_window_type_toolbar)
+		return "_NET_WM_WINDOW_TYPE_TOOLBAR";
+	else if (atom == wm->atom.net_wm_window_type_menu)
+		return  "_NET_WM_WINDOW_TYPE_MENU";
+	else if (atom == wm->atom.net_wm_window_type_utility)
+		return "_WM_WINDOW_TYPE_UTILITY";
+	else if (atom == wm->atom.net_wm_window_type_splash)
+		return "_NET_WM_WINDOW_TYPE_SPLASH";
+	else if (atom == wm->atom.net_wm_window_type_dialog)
+		return "_NET_WM_WINDOW_TYPE_DIALOG";
+	else if (atom == wm->atom.net_wm_window_type_dropdown)
+		return "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU";
+	else if (atom == wm->atom.net_wm_window_type_popup)
+		return "_NET_WM_WINDOW_TYPE_POPUP_MENU";
+	else if (atom == wm->atom.net_wm_window_type_tooltip)
+		return "_NET_WM_WINDOW_TYPE_TOOLTIP";
+	else if (atom == wm->atom.net_wm_window_type_notification)
+		return "_NET_WM_WINDOW_TYPE_NOTIFICATION";
+	else if (atom == wm->atom.net_wm_window_type_combo)
+		return "_NET_WM_WINDOW_TYPE_COMBO";
+	else if (atom == wm->atom.net_wm_window_type_dnd)
+		return "_NET_WM_WINDOW_TYPE_DND";
+	else if (atom == wm->atom.kde_net_wm_window_type_override)
+		return "_KDE_NET_WM_WINDOW_TYPE_OVERRIDE";
+	else
+		return "UNKNOWN";
+}
+
 /* We reuse some predefined, but otherwise useles atoms
  * as local type placeholders that never touch the X11 server,
  * to make weston_wm_window_read_properties() less exceptional.
@@ -499,6 +541,7 @@ read_and_dump_property(FILE *fp, struct weston_wm *wm,
 #define TYPE_MOTIF_WM_HINTS	XCB_ATOM_CUT_BUFFER1
 #define TYPE_NET_WM_STATE	XCB_ATOM_CUT_BUFFER2
 #define TYPE_WM_NORMAL_HINTS	XCB_ATOM_CUT_BUFFER3
+#define TYPE_WM_WINDOW_TYPE	XCB_ATOM_CUT_BUFFER4
 
 static void
 weston_wm_window_read_properties(struct weston_wm_window *window)
@@ -517,7 +560,7 @@ weston_wm_window_read_properties(struct weston_wm_window *window)
 		{ wm->atom.wm_protocols,       TYPE_WM_PROTOCOLS,          NULL },
 		{ wm->atom.wm_normal_hints,    TYPE_WM_NORMAL_HINTS,       NULL },
 		{ wm->atom.net_wm_state,       TYPE_NET_WM_STATE,          NULL },
-		{ wm->atom.net_wm_window_type, XCB_ATOM_ATOM,              F(type) },
+		{ wm->atom.net_wm_window_type, TYPE_WM_WINDOW_TYPE,        F(type) },
 		{ wm->atom.net_wm_name,        XCB_ATOM_STRING,            F(name) },
 		{ wm->atom.net_wm_pid,         XCB_ATOM_CARDINAL,          F(pid) },
 		{ wm->atom.motif_wm_hints,     TYPE_MOTIF_WM_HINTS,        NULL },
@@ -548,6 +591,7 @@ weston_wm_window_read_properties(struct weston_wm_window *window)
 	window->size_hints.flags = 0;
 	window->motif_hints.flags = 0;
 	window->delete_window = 0;
+	window->take_focus = 0;
 
 	for (i = 0; i < ARRAY_LENGTH(props); i++)  {
 		reply = xcb_get_property_reply(wm->conn, cookie[i], NULL);
@@ -585,12 +629,30 @@ weston_wm_window_read_properties(struct weston_wm_window *window)
 			atom = xcb_get_property_value(reply);
 			*(xcb_atom_t *) p = *atom;
 			break;
+		case TYPE_WM_WINDOW_TYPE:
+			atom = xcb_get_property_value(reply);
+			/* pick first one as type */
+			*(xcb_atom_t *) p = *atom;
+			/* scan all atoms */
+			for (i = 0; i < reply->value_len; i++) {
+				/* while there is a lot of discussion on this KDE property, but
+				   commonly mentioned there should be no window decoration at all
+				   including window shadow for _KDE_NET_WM_WINDOW_TYPE_OVERRIDE. */
+				if (atom[i] == wm->atom.kde_net_wm_window_type_override) {
+					window->no_shadow = 1;
+					window->decorate = 0;
+				}
+				wm_printf(wm, "wm_window_read_properties (window %d) window type: %s\n",
+					window->id, window_type_atom_to_string(wm, atom[i]));
+			}
+			break;
 		case TYPE_WM_PROTOCOLS:
 			atom = xcb_get_property_value(reply);
 			for (i = 0; i < reply->value_len; i++)
 				if (atom[i] == wm->atom.wm_delete_window) {
 					window->delete_window = 1;
-					break;
+				} else if (atom[i] == wm->atom.wm_take_focus) {
+					window->take_focus = 1;
 				}
 			break;
 		case TYPE_WM_NORMAL_HINTS:
@@ -924,16 +986,18 @@ weston_wm_send_focus_window(struct weston_wm *wm,
 		if (window->override_redirect)
 			return;
 
-		client_message.response_type = XCB_CLIENT_MESSAGE;
-		client_message.format = 32;
-		client_message.window = window->id;
-		client_message.type = wm->atom.wm_protocols;
-		client_message.data.data32[0] = wm->atom.wm_take_focus;
-		client_message.data.data32[1] = XCB_TIME_CURRENT_TIME;
+		if (window->take_focus) {
+			client_message.response_type = XCB_CLIENT_MESSAGE;
+			client_message.format = 32;
+			client_message.window = window->id;
+			client_message.type = wm->atom.wm_protocols;
+			client_message.data.data32[0] = wm->atom.wm_take_focus;
+			client_message.data.data32[1] = XCB_TIME_CURRENT_TIME;
 
-		xcb_send_event(wm->conn, 0, window->id,
-			       XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT,
-			       (char *) &client_message);
+			xcb_send_event(wm->conn, 0, window->id,
+				       XCB_EVENT_MASK_NO_EVENT,
+				       (char *) &client_message);
+		}
 
 		xcb_set_input_focus (wm->conn, XCB_INPUT_FOCUS_POINTER_ROOT,
 				     window->id, XCB_TIME_CURRENT_TIME);
@@ -1078,6 +1142,9 @@ weston_wm_window_create_frame(struct weston_wm_window *window)
 
 	if (window->decorate & MWM_DECOR_MAXIMIZE)
 		buttons |= FRAME_BUTTON_MAXIMIZE;
+
+	if (window->decorate & MWM_DECOR_MINIMIZE)
+		buttons |= FRAME_BUTTON_MINIMIZE;
 
 	window->frame = frame_create(window->wm->theme,
 				     window->width, window->height,
@@ -1299,6 +1366,12 @@ weston_wm_window_draw_decoration(struct weston_wm_window *window)
 		how = "decorate";
 		frame_set_title(window->frame, window->name);
 		frame_repaint(window->frame, cr);
+	} else if (window->maximized_vert && window->maximized_horz) {
+		how = "maximized";
+		/* nothing */
+	} else if (window->no_shadow) {
+		how = "no shadow";
+		/* nothing */
 	} else {
 		how = "shadow";
 		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
@@ -1431,6 +1504,71 @@ weston_wm_window_schedule_repaint(struct weston_wm_window *window)
 				       weston_wm_window_do_repaint, window);
 }
 
+static bool
+weston_wm_window_set_icon(struct weston_wm *wm,
+	struct weston_wm_window *window, xcb_window_t window_id)
+{
+	bool is_set_window_icon_called = false;
+	const struct weston_desktop_xwayland_interface *xwayland_interface =
+		wm->server->compositor->xwayland_interface;
+	xcb_get_property_reply_t *reply;
+	xcb_get_property_cookie_t cookie;
+	char *data;
+	int length;
+	uint32_t *cur, *selected_bits;
+	uint32_t width, selected_width;
+	uint32_t height, selected_height;
+
+	if (!xwayland_interface->set_window_icon)
+		return false;
+
+	if (!window->shsurf) {
+		/* shell surface is not associated yet */
+		return false;
+	}
+
+	cookie = xcb_get_property(wm->conn, 0, window_id,
+				wm->atom.net_wm_icon, XCB_ATOM_CARDINAL, 0,  0x1fffffff);
+	reply = xcb_get_property_reply(wm->conn, cookie, NULL);
+	if (!reply)
+		return false;
+	length = xcb_get_property_value_length(reply);
+	if (!length) {
+		free(reply);
+		return false;
+	}
+	assert(reply->type == XCB_ATOM_CARDINAL);
+	data = xcb_get_property_value(reply);
+	wm_printf(wm, "weston_wm_window_set_icon: data:%p, length:%d\n", data, length);
+
+	selected_bits = NULL;
+	selected_width = 0;
+	selected_height = 0;
+	cur = (uint32_t*)data;
+	while ((char *)cur < data+length) {
+		width = *cur++;
+		height = *cur++;
+		if (selected_width < width && selected_height < height) {
+			selected_width = width;
+			selected_height = height;
+			selected_bits = cur;
+		}
+		wm_printf(wm, "    icon (%d x %d) at %p\n", width, height, cur);
+		cur += (width*height);
+	}
+
+	wm_printf(wm, "    selected icon (%d x %d) at %p\n", selected_width, selected_height, selected_bits);
+
+	if (selected_width && selected_height && selected_bits) {
+		xwayland_interface->set_window_icon(window->shsurf, selected_width, selected_height, 32, selected_bits);
+		is_set_window_icon_called = true;
+	}
+
+	free(reply);
+
+	return is_set_window_icon_called;
+}
+
 static void
 weston_wm_handle_property_notify(struct weston_wm *wm, xcb_generic_event_t *event)
 {
@@ -1477,6 +1615,9 @@ weston_wm_handle_property_notify(struct weston_wm *wm, xcb_generic_event_t *even
 	if (property_notify->atom == wm->atom.net_wm_name ||
 	    property_notify->atom == XCB_ATOM_WM_NAME)
 		weston_wm_window_schedule_repaint(window);
+
+	if (property_notify->atom == wm->atom.net_wm_icon)
+		weston_wm_window_set_icon(wm, window, property_notify->window);
 }
 
 static void
@@ -1807,13 +1948,37 @@ weston_wm_window_handle_state(struct weston_wm_window *window,
 			if (weston_wm_window_is_maximized(window)) {
 				window->saved_width = window->width;
 				window->saved_height = window->height;
-
+				if (window->frame)
+					frame_set_flag(window->frame, FRAME_FLAG_MAXIMIZED);
 				if (window->shsurf)
 					xwayland_interface->set_maximized(window->shsurf);
 			} else if (window->shsurf) {
 				weston_wm_window_set_toplevel(window);
+				if (window->frame)
+					frame_unset_flag(window->frame, FRAME_FLAG_MAXIMIZED);
 			}
 		}
+	}
+}
+
+static void
+weston_wm_window_handle_iconic_state(struct weston_wm_window *window,
+			      xcb_client_message_event_t *client_message)
+{
+	struct weston_wm *wm = window->wm;
+	const struct weston_desktop_xwayland_interface *xwayland_interface =
+		wm->server->compositor->xwayland_interface;
+	uint32_t iconic_state;
+
+	if (!window->shsurf)
+		return;
+
+	iconic_state = client_message->data.data32[0];
+
+	if (iconic_state == ICCCM_ICONIC_STATE) {
+		window->saved_height = window->height;
+		window->saved_width = window->width;
+		xwayland_interface->set_minimized(window->shsurf);
 	}
 }
 
@@ -1894,6 +2059,8 @@ weston_wm_handle_client_message(struct weston_wm *wm,
 		weston_wm_window_handle_state(window, client_message);
 	else if (client_message->type == wm->atom.wl_surface_id)
 		weston_wm_window_handle_surface_id(window, client_message);
+	else if (client_message->type == wm->atom.wm_change_state)
+		weston_wm_window_handle_iconic_state(window, client_message);
 }
 
 enum cursor_type {
@@ -2170,11 +2337,20 @@ weston_wm_handle_button(struct weston_wm *wm, xcb_generic_event_t *event)
 		if (weston_wm_window_is_maximized(window)) {
 			window->saved_width = window->width;
 			window->saved_height = window->height;
+			frame_set_flag(window->frame, FRAME_FLAG_MAXIMIZED);
 			xwayland_interface->set_maximized(window->shsurf);
 		} else {
 			weston_wm_window_set_toplevel(window);
+			frame_unset_flag(window->frame, FRAME_FLAG_MAXIMIZED);
 		}
 		frame_status_clear(window->frame, FRAME_STATUS_MAXIMIZE);
+	}
+
+	if (frame_status(window->frame) & FRAME_STATUS_MINIMIZE) {
+		window->saved_width = window->width;
+		window->saved_height = window->height;
+		xwayland_interface->set_minimized(window->shsurf);
+		frame_status_clear(window->frame, FRAME_STATUS_MINIMIZE);
 	}
 }
 
@@ -2386,6 +2562,7 @@ weston_wm_get_resources(struct weston_wm *wm)
 		{ "WM_STATE",		F(atom.wm_state) },
 		{ "WM_S0",		F(atom.wm_s0) },
 		{ "WM_CLIENT_MACHINE",	F(atom.wm_client_machine) },
+		{ "WM_CHANGE_STATE", F(atom.wm_change_state) },
 		{ "_NET_WM_CM_S0",	F(atom.net_wm_cm_s0) },
 		{ "_NET_WM_NAME",	F(atom.net_wm_name) },
 		{ "_NET_WM_PID",	F(atom.net_wm_pid) },
@@ -2398,6 +2575,7 @@ weston_wm_get_resources(struct weston_wm *wm)
 		{ "_NET_WM_ICON_NAME", F(atom.net_wm_icon_name) },
 		{ "_NET_WM_DESKTOP", F(atom.net_wm_desktop) },
 		{ "_NET_WM_WINDOW_TYPE", F(atom.net_wm_window_type) },
+		{ "_KDE_NET_WM_WINDOW_TYPE_OVERRIDE",	F(atom.kde_net_wm_window_type_override) },
 
 		{ "_NET_WM_WINDOW_TYPE_DESKTOP", F(atom.net_wm_window_type_desktop) },
 		{ "_NET_WM_WINDOW_TYPE_DOCK", F(atom.net_wm_window_type_dock) },
@@ -2820,6 +2998,89 @@ send_position(struct weston_surface *surface, int32_t x, int32_t y)
 	}
 }
 
+static void
+set_maximized(struct weston_surface *surface, bool is_maximized)
+{
+	struct weston_wm_window *window = get_wm_window(surface);
+	struct weston_wm *wm;
+
+	if (!window || !window->wm)
+		return;
+
+	wm = window->wm;
+
+	if (is_maximized) {
+		if (!weston_wm_window_is_maximized(window)) {
+			window->maximized_horz = 1;
+			window->maximized_vert = 1;
+			window->saved_width = window->width;
+			window->saved_height = window->height;
+			frame_set_flag(window->frame, FRAME_FLAG_MAXIMIZED);
+			wm->server->compositor->xwayland_interface->set_maximized(window->shsurf);
+		}
+	}
+	else {
+		if (weston_wm_window_is_maximized(window)) {
+			window->maximized_horz = 0;
+			window->maximized_vert = 0;
+			frame_unset_flag(window->frame, FRAME_FLAG_MAXIMIZED);
+			weston_wm_window_set_toplevel(window);
+		}
+	}
+	weston_wm_window_set_net_wm_state(window);
+}
+
+static char *
+get_class_name(struct weston_surface *surface)
+{
+	struct weston_wm_window *window = get_wm_window(surface);
+	struct weston_wm *wm;
+	xcb_get_property_reply_t *reply;
+	xcb_get_property_cookie_t cookie;
+	char *data;
+	int length;
+	char *name = NULL;
+
+	if (!window || !window->wm)
+		return NULL;
+
+	wm = window->wm;
+	cookie = xcb_get_property(wm->conn, 0, window->id,
+				XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 0,  0x1fffffff);
+	reply = xcb_get_property_reply(wm->conn, cookie, NULL);
+	if (!reply)
+		return NULL;
+	length = xcb_get_property_value_length(reply);
+	if (!length) {
+		free(reply);
+		return NULL;
+	}
+	assert(reply->type == XCB_ATOM_STRING);
+	data = xcb_get_property_value(reply);
+	while (*data != '\0') // class name is 2 strings, skip first one.
+		data++;
+	data++; // skip null.
+	wm_printf(wm, "get_class_name: name:%s, length:%d\n", data, length);
+	if (*data) // make sure 2nd string is not just null.
+		name = strdup(data);
+	free(reply);
+
+	return name;
+}
+
+static bool
+trigger_set_window_icon(struct weston_surface *surface)
+{
+	struct weston_wm_window *window = get_wm_window(surface);
+	struct weston_wm *wm;
+
+	if (!window || !window->wm)
+		return false;
+
+	wm = window->wm;
+	return weston_wm_window_set_icon(wm, window, window->id);
+}
+
 static const struct weston_xwayland_client_interface shell_client = {
 	send_configure,
 	send_close,
@@ -2999,4 +3260,7 @@ xserver_map_shell_surface(struct weston_wm_window *window,
 const struct weston_xwayland_surface_api surface_api = {
 	is_wm_window,
 	send_position,
+	set_maximized,
+	get_class_name,
+	trigger_set_window_icon,
 };

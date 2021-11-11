@@ -29,6 +29,7 @@
 #include <signal.h>
 #include <string.h>
 #include <errno.h>
+#include <assert.h>
 #include <sys/socket.h>
 
 #include <libweston/libweston.h>
@@ -68,6 +69,7 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 	char s[12], abstract_fd_str[12], unix_fd_str[12], wm_fd_str[12];
 	int sv[2], wm[2], fd;
 	char *xserver = NULL;
+	bool disable_ac = false;
 	struct weston_config *config = wet_get_config(wxw->compositor);
 	struct weston_config_section *section;
 
@@ -92,10 +94,12 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		snprintf(s, sizeof s, "%d", fd);
 		setenv("WAYLAND_SOCKET", s, 1);
 
-		fd = dup(abstract_fd);
-		if (fd < 0)
-			goto fail;
-		snprintf(abstract_fd_str, sizeof abstract_fd_str, "%d", fd);
+		if (abstract_fd) {
+			fd = dup(abstract_fd);
+			if (fd < 0)
+				goto fail;
+			snprintf(abstract_fd_str, sizeof abstract_fd_str, "%d", fd);
+		}
 		fd = dup(unix_fd);
 		if (fd < 0)
 			goto fail;
@@ -109,6 +113,8 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 						    "xwayland", NULL, NULL);
 		weston_config_section_get_string(section, "path",
 						 &xserver, XSERVER_PATH);
+		weston_config_section_get_bool(section, "disable_access_control", 
+						&disable_ac, false);
 
 		/* Ignore SIGUSR1 in the child, which will make the X
 		 * server send SIGUSR1 to the parent (weston) when
@@ -119,30 +125,50 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		 * it's done with that. */
 		signal(SIGUSR1, SIG_IGN);
 
-		if (execl(xserver,
-			  xserver,
-			  display,
-			  "-rootless",
+		// Build our parameters
+		#define ARGS_COUNT 13
+		const char *argv[ARGS_COUNT] = {
+			xserver,				// 0
+			display,				// 1
+			"-rootless",			// 2
+			"-core",				// 3
 #ifdef HAVE_XWAYLAND_LISTENFD
-			  "-listenfd", abstract_fd_str,
-			  "-listenfd", unix_fd_str,
+			"-listenfd", unix_fd_str, // 4, 5
 #else
-			  "-listen", abstract_fd_str,
-			  "-listen", unix_fd_str,
+			"-listen", unix_fd_str,	// 4, 5
 #endif
-			  "-wm", wm_fd_str,
-			  "-terminate",
-			  NULL) < 0)
-			weston_log("exec of '%s %s -rootless "
+			"-wm", wm_fd_str,		// 6, 7
+			"-terminate",			// 8
+			NULL, NULL, 			// 9, 10 (-listen, abstract_fd_str)
+			NULL, 					// 11 (-ac)
+			NULL					// 12
+		};
+
+		int argc = 9;
+		if (abstract_fd) {
 #ifdef HAVE_XWAYLAND_LISTENFD
-				   "-listenfd %s -listenfd %s "
+			argv[argc++] = "-listenfd";
 #else
-				   "-listen %s -listen %s "
+			argv[argc++] = "-listen";
 #endif
-				   "-wm %s -terminate' failed: %s\n",
-				   xserver, display,
-				   abstract_fd_str, unix_fd_str, wm_fd_str,
-				   strerror(errno));
+			argv[argc++] = abstract_fd_str;
+		} else {
+			argv[argc++] = "-nolisten";
+			argv[argc++] = "local";
+		}
+
+		if (disable_ac) {
+			argv[argc++] = "-ac";
+		}
+		assert(argc <= ARGS_COUNT);
+
+		if(execv(xserver, (char* const*)argv) < 0) {
+			weston_log("Failed to launch Xwayland(");
+			for (int i=0; i<argc; i++)
+				weston_log_continue("%s ", argv[i]);
+			weston_log_continue(") due to %s\n", strerror(errno));
+		}
+
 	fail:
 		_exit(EXIT_FAILURE);
 

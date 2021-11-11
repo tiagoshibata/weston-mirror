@@ -102,6 +102,7 @@ struct weston_wm {
 		xcb_atom_t		 wm_state;
 		xcb_atom_t		 wm_s0;
 		xcb_atom_t		 wm_client_machine;
+		xcb_atom_t 		 wm_change_state;
 		xcb_atom_t		 net_wm_cm_s0;
 		xcb_atom_t		 net_wm_name;
 		xcb_atom_t		 net_wm_pid;
@@ -128,6 +129,7 @@ struct weston_wm {
 		xcb_atom_t		 net_wm_window_type_combo;
 		xcb_atom_t		 net_wm_window_type_dnd;
 		xcb_atom_t		 net_wm_window_type_normal;
+		xcb_atom_t		 kde_net_wm_window_type_override;
 		xcb_atom_t		 net_wm_moveresize;
 		xcb_atom_t		 net_supporting_wm_check;
 		xcb_atom_t		 net_supported;
