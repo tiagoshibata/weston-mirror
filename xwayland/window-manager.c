@@ -1316,7 +1316,8 @@ weston_wm_window_create_frame(struct weston_wm_window *window)
 			  32,
 			  window->frame_id,
 			  wm->screen->root,
-			  SHRT_MIN, SHRT_MIN, /* see XCB_CONFIGURE_NOTIFY */
+			  window->override_redirect ? 0 : SHRT_MIN,
+			  window->override_redirect ? 0 : SHRT_MIN, /* see XCB_CONFIGURE_NOTIFY */
 			  width, height,
 			  0,
 			  XCB_WINDOW_CLASS_INPUT_OUTPUT,
